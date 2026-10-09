@@ -11,7 +11,7 @@ const app = express()
 
 app.set('trust proxy', true)
 
-app.use(helmet())
+app.use(helmet({ crossOriginResourcePolicy: false }))
 
 app.use(bodyParser.json())
 
@@ -25,6 +25,8 @@ const corsOptions = {
 }
 
 app.use(cors(corsOptions))
+
+app.use('/public', express.static('public'))
 
 app.use(routes)
 

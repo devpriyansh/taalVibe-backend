@@ -223,6 +223,32 @@ const config = convict({
       env: 'AZURE_AUTHORITY_HOST'
     }
   },
+  r2: {
+    accountId: {
+      doc: 'Cloudflare R2 Account ID',
+      format: String,
+      default: '',
+      env: 'R2_ACCOUNT_ID'
+    },
+    accessKeyId: {
+      doc: 'Cloudflare R2 Access Key ID',
+      format: String,
+      default: '',
+      env: 'R2_ACCESS_KEY_ID'
+    },
+    secretAccessKey: {
+      doc: 'Cloudflare R2 Secret Access Key',
+      format: String,
+      default: '',
+      env: 'R2_SECRET_ACCESS_KEY'
+    },
+    bucketName: {
+      doc: 'Cloudflare R2 Bucket Name',
+      format: String,
+      default: 'sonora-music',
+      env: 'R2_BUCKET_NAME'
+    }
+  },
   // zoho: {
   //   clientId: {
   //     doc: 'Client ID for Zoho CRM API',
@@ -325,6 +351,18 @@ const config = convict({
       format: String,
       default: '',
       env: 'GOOGLE_CLIENT_ID'
+    },
+    clientSecret: {
+      doc: 'Google OAuth2 Client Secret',
+      format: String,
+      default: '',
+      env: 'GOOGLE_CLIENT_SECRET'
+    },
+    redirectUri: {
+      doc: 'Google OAuth2 Redirect URI',
+      format: String,
+      default: 'http://localhost:8080/api/v1/music/auth/google/callback',
+      env: 'GOOGLE_REDIRECT_URI'
     }
   },
 

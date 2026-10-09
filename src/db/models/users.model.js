@@ -65,6 +65,11 @@ export default (sequelize, DataTypes) => {
         allowNull: true,
         field: 'reset_token_expires'
       },
+      role: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        defaultValue: 'USER'
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -94,6 +99,18 @@ export default (sequelize, DataTypes) => {
       ]
     }
   )
+
+  User.associate = function(models) {
+    if (models.Song) {
+      User.hasMany(models.Song, { foreignKey: 'userId', as: 'songs' })
+    }
+    if (models.Playlist) {
+      User.hasMany(models.Playlist, { foreignKey: 'user_id', as: 'playlists' })
+    }
+    if (models.UserFavorite) {
+      User.hasMany(models.UserFavorite, { foreignKey: 'userId', as: 'favorites' })
+    }
+  }
 
   return User
 }

@@ -109,7 +109,8 @@ export default class GoogleLogin extends serviceBase {
             email: user.email,
             firstName: user.firstName,
             lastName: user.lastName,
-            profilePicture: user.profilePicture
+            profilePicture: user.profilePicture,
+            role: user.role
           },
           loginToken,
           refreshToken,

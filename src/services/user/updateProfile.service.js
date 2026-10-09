@@ -43,7 +43,8 @@ export default class updateProfileService extends serviceBase {
         lastName: user.lastName,
         userName: user.userName,
         phone: user.phone,
-        geminiApiKey: user.geminiApiKey
+        geminiApiKey: user.geminiApiKey,
+        role: user.role
       }
 
       return {

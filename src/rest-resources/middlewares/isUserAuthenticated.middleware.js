@@ -3,7 +3,13 @@ import { messages } from '../../utils/constants/error.constants'
 import db from '../../db/models'
 
 export function isUserAuthenticated (req, res, next) {
-  const authHeader = req.headers.authorization
+  let authHeader = req.headers.authorization
+
+  // Fallback to query token for streaming audio tags
+  if (!authHeader && req.query.token) {
+    authHeader = `Bearer ${req.query.token}`;
+    req.headers.authorization = authHeader;
+  }
 
   // Check if the Authorization header exists
   if (!authHeader) {

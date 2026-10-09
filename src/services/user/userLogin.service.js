@@ -69,7 +69,8 @@ export default class UserLogin extends serviceBase {
           user: {
             id: user.id,
             userName: user.userName,
-            email: user.email
+            email: user.email,
+            role: user.role
           },
           loginToken,
           refreshToken,

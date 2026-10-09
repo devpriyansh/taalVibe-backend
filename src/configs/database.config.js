@@ -9,7 +9,6 @@ const commonSetting = {
   dialect: 'postgres',
   dialectOptions: {
     application_name: config.get('app.name'),
-    // TLS ON, but do not verify DB server certificate
     ssl: {
       require: true,
       rejectUnauthorized: false

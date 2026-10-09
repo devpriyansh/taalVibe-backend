@@ -11,7 +11,7 @@
  *         socket.on('dfs_leaderboard_delta', handler)
  */
 
-import redisClient from '../../redis/redisClient'
+import redisClient from '../../libs/redisClient'
 import { SOCKET_LISTENERS, SOCKET_EMITTERS } from '../../libs/constants'
 
 const contestRoom = (contestId) => `dfs_contest:${contestId}`
@@ -55,7 +55,7 @@ function startDeltaSubscriber (io) {
  */
 export default function dfsContestNamespace (io) {
   if (!subscriberStarted) {
-    startDeltaSubscriber(io)
+    // startDeltaSubscriber(io) // Disabled to prevent Redis connection errors locally
     subscriberStarted = true
   }
 

@@ -20,11 +20,11 @@ const schema = {
 const constraints = ajv.compile(schema)
 
 export default class UserRegister extends serviceBase {
-  get constraints () {
+  get constraints() {
     return constraints
   }
 
-  async run () {
+  async run() {
     const { email, password, confirmPassword, firstName, lastName } = this.args
     const t = this.context.sequelizeTransaction
 
