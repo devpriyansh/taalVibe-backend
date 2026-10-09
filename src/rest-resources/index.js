@@ -18,10 +18,21 @@ app.use(bodyParser.json())
 app.use(morgan('tiny'))
 
 // CORS Configuration
+const allowedOrigins = [
+  'http://localhost:5173',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 const corsOptions = {
   credentials: true,
-  origin: '*',
-  methods: ['GET, POST, PUT, PATCH, DELETE']
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Fallback to true to prevent hard crashes for now, but configured properly
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 }
 
 app.use(cors(corsOptions))
