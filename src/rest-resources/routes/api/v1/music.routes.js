@@ -106,6 +106,48 @@ musicRoutes.route('/songs/:id/favorite').patch(
   responseValidationMiddleware(standardResponseSchema)
 );
 
+// --- FEATURED / DRIVE PLAYLISTS ---
+musicRoutes.route('/featured-playlists').get(
+  MusicController.getFeaturedPlaylists,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
+musicRoutes.route('/featured-playlists/:idOrSlug').get(
+  MusicController.getFeaturedPlaylist,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
+// Admin Featured Playlists Management
+musicRoutes.route('/admin/drive-folders').get(
+  isAdmin,
+  MusicController.getAdminDriveFolders,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
+musicRoutes.route('/admin/featured-playlists').post(
+  isAdmin,
+  MusicController.createFeaturedPlaylist,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
+musicRoutes.route('/admin/featured-playlists/:id').put(
+  isAdmin,
+  MusicController.updateFeaturedPlaylist,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
+musicRoutes.route('/admin/featured-playlists/:id').delete(
+  isAdmin,
+  MusicController.deleteFeaturedPlaylist,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
+musicRoutes.route('/admin/featured-playlists/:id/sync').post(
+  isAdmin,
+  MusicController.syncFeaturedPlaylist,
+  responseValidationMiddleware(standardResponseSchema)
+);
+
 // --- PLAYLISTS ---
 musicRoutes.route('/playlists').get(
   MusicController.getPlaylists,

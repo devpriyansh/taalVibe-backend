@@ -37,16 +37,20 @@ export default async function contextMiddleware (req, res, next) {
     context.sequelizeTransaction = await sequelize.transaction()
 
     const onFinishAndClose = async () => {
-      if (~transactionStatuses.indexOf(context.sequelizeTransaction.finished)) {
-        return
-      }
+      try {
+        if (~transactionStatuses.indexOf(context.sequelizeTransaction.finished)) {
+          return
+        }
 
-      if (~errorStatusCodes.indexOf(res.statusCode.toString()[0]) || res.payload?.errors?.length || !res.payload) {
-        await context.sequelizeTransaction.rollback()
-        return
-      }
+        if (~errorStatusCodes.indexOf(res.statusCode.toString()[0]) || res.payload?.errors?.length || !res.payload) {
+          await context.sequelizeTransaction.rollback()
+          return
+        }
 
-      await context.sequelizeTransaction.commit()
+        await context.sequelizeTransaction.commit()
+      } catch (err) {
+        context.logger?.warn?.(`Transaction cleanup error: ${err.message}`)
+      }
     }
 
     res.on('finish', onFinishAndClose)

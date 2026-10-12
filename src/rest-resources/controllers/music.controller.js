@@ -534,6 +534,277 @@ class MusicController {
       return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
     }
   }
+
+  // --- FEATURED / DRIVE PLAYLISTS ---
+
+  async ensureDefaultDrivePlaylists() {
+    if (!db.DrivePlaylist) return;
+    try {
+      await db.DrivePlaylist.sync();
+      const count = await db.DrivePlaylist.count();
+      if (count === 0) {
+        await db.DrivePlaylist.bulkCreate([
+          {
+            name: 'TaalVibe Special',
+            slug: 'taalvibe-special',
+            description: 'Handpicked hits, trending beats & exclusive tracks',
+            gradient: 'from-[#ff0f7b] to-[#f89b29]',
+            iconName: 'Sparkles',
+            position: 0,
+            isActive: true
+          },
+          {
+            name: 'Old Songs',
+            slug: 'old-songs',
+            description: 'Golden retro hits, timeless classics & pure nostalgia',
+            gradient: 'from-[#4facfe] to-[#00f2fe]',
+            iconName: 'Radio',
+            position: 1,
+            isActive: true
+          },
+          {
+            name: 'Romantic Songs',
+            slug: 'romantic-songs',
+            description: 'Soulful acoustic & heartwarming love melodies',
+            gradient: 'from-[#8E2DE2] to-[#4A00E0]',
+            iconName: 'Heart',
+            position: 2,
+            isActive: true
+          },
+          {
+            name: 'Feel Good & Chill',
+            slug: 'feel-good',
+            description: 'Uplifting beats, breezy rhythms & relaxing vibes',
+            gradient: 'from-[#11998e] to-[#38ef7d]',
+            iconName: 'Coffee',
+            position: 3,
+            isActive: true
+          }
+        ]);
+      }
+    } catch (err) {
+      console.warn('ensureDefaultDrivePlaylists error:', err.message);
+    }
+  }
+
+  async getFeaturedPlaylists(req, res) {
+    try {
+      await this.ensureDefaultDrivePlaylists();
+
+      const playlists = await db.DrivePlaylist.findAll({
+        where: { isActive: true },
+        order: [['position', 'ASC'], ['id', 'ASC']]
+      });
+
+      const result = await Promise.all(playlists.map(async (pl) => {
+        const plJson = pl.toJSON();
+        let songCount = 0;
+        if (pl.folderId) {
+          songCount = await db.Song.count({
+            where: {
+              folderId: pl.folderId,
+              isActive: true
+            }
+          });
+        }
+        return {
+          ...plJson,
+          songCount
+        };
+      }));
+
+      return res.status(200).json({
+        status: 200,
+        message: 'Featured playlists retrieved',
+        result: { playlists: result }
+      });
+    } catch (error) {
+      console.error('getFeaturedPlaylists error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
+
+  async getFeaturedPlaylist(req, res) {
+    try {
+      const { idOrSlug } = req.params;
+      const userId = req.userId;
+      await this.ensureDefaultDrivePlaylists();
+
+      const isNumeric = !isNaN(parseInt(idOrSlug, 10)) && /^\d+$/.test(idOrSlug);
+      const playlist = await db.DrivePlaylist.findOne({
+        where: isNumeric ? { id: parseInt(idOrSlug, 10) } : { slug: idOrSlug }
+      });
+
+      if (!playlist) {
+        return res.status(404).json({ status: 404, message: 'Playlist not found' });
+      }
+
+      let songs = [];
+      if (playlist.folderId) {
+        const songsData = await db.Song.findAll({
+          where: {
+            folderId: playlist.folderId,
+            isActive: true
+          },
+          include: [{
+            model: db.User,
+            as: 'favoritedBy',
+            where: { id: userId },
+            required: false,
+            attributes: ['id']
+          }],
+          order: [['title', 'ASC']]
+        });
+
+        songs = songsData.map(song => {
+          const songJSON = song.toJSON();
+          songJSON.favorite = song.favoritedBy && song.favoritedBy.length > 0;
+          delete songJSON.favoritedBy;
+          if (songJSON.coverArtKey) {
+            songJSON.coverArtUrl = `/public/artwork/${songJSON.coverArtKey}`;
+          }
+          return songJSON;
+        });
+      }
+
+      return res.status(200).json({
+        status: 200,
+        message: 'Playlist retrieved',
+        result: {
+          playlist: playlist.toJSON(),
+          songs
+        }
+      });
+    } catch (error) {
+      console.error('getFeaturedPlaylist error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
+
+  async getAdminDriveFolders(req, res) {
+    try {
+      const folders = await GoogleDriveStorageService.listSubfolders();
+      return res.status(200).json({
+        status: 200,
+        message: 'Drive folders retrieved',
+        result: { folders }
+      });
+    } catch (error) {
+      console.error('getAdminDriveFolders error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
+
+  async createFeaturedPlaylist(req, res) {
+    try {
+      await this.ensureDefaultDrivePlaylists();
+      const { name, slug, description, folderId, gradient, iconName } = req.body;
+      if (!name) return res.status(400).json({ status: 400, message: 'Name is required' });
+
+      const autoSlug = (slug || name)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
+
+      const count = await db.DrivePlaylist.count();
+
+      const playlist = await db.DrivePlaylist.create({
+        name,
+        slug: autoSlug || `playlist-${Date.now()}`,
+        description: description || '',
+        folderId: folderId || null,
+        gradient: gradient || 'from-[#ff0f7b] to-[#f89b29]',
+        iconName: iconName || 'Sparkles',
+        position: count,
+        isActive: true
+      });
+
+      return res.status(200).json({
+        status: 200,
+        message: 'Playlist created',
+        result: { playlist }
+      });
+    } catch (error) {
+      console.error('createFeaturedPlaylist error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
+
+  async updateFeaturedPlaylist(req, res) {
+    try {
+      const { id } = req.params;
+      const { name, description, folderId, gradient, iconName, isActive, position } = req.body;
+
+      const playlist = await db.DrivePlaylist.findByPk(id);
+      if (!playlist) return res.status(404).json({ status: 404, message: 'Playlist not found' });
+
+      if (name !== undefined) playlist.name = name;
+      if (description !== undefined) playlist.description = description;
+      if (folderId !== undefined) playlist.folderId = folderId;
+      if (gradient !== undefined) playlist.gradient = gradient;
+      if (iconName !== undefined) playlist.iconName = iconName;
+      if (isActive !== undefined) playlist.isActive = isActive;
+      if (position !== undefined) playlist.position = position;
+
+      await playlist.save();
+
+      return res.status(200).json({
+        status: 200,
+        message: 'Playlist updated',
+        result: { playlist }
+      });
+    } catch (error) {
+      console.error('updateFeaturedPlaylist error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
+
+  async deleteFeaturedPlaylist(req, res) {
+    try {
+      const { id } = req.params;
+      const playlist = await db.DrivePlaylist.findByPk(id);
+      if (!playlist) return res.status(404).json({ status: 404, message: 'Playlist not found' });
+
+      await playlist.destroy();
+      return res.status(200).json({
+        status: 200,
+        message: 'Playlist deleted',
+        result: {}
+      });
+    } catch (error) {
+      console.error('deleteFeaturedPlaylist error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
+
+  async syncFeaturedPlaylist(req, res) {
+    try {
+      const { id } = req.params;
+      const playlist = await db.DrivePlaylist.findByPk(id);
+      if (!playlist || !playlist.folderId) {
+        return res.status(400).json({ status: 400, message: 'Playlist folder ID not set' });
+      }
+
+      const stats = await GoogleDriveStorageService.syncLibrary(playlist.folderId);
+      return res.status(200).json({
+        status: 200,
+        message: 'Playlist folder synced',
+        result: { stats }
+      });
+    } catch (error) {
+      console.error('syncFeaturedPlaylist error:', error);
+      return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
+    }
+  }
 }
 
-export default new MusicController();
+const musicControllerInstance = new MusicController();
+musicControllerInstance.getFeaturedPlaylists = musicControllerInstance.getFeaturedPlaylists.bind(musicControllerInstance);
+musicControllerInstance.getFeaturedPlaylist = musicControllerInstance.getFeaturedPlaylist.bind(musicControllerInstance);
+musicControllerInstance.getAdminDriveFolders = musicControllerInstance.getAdminDriveFolders.bind(musicControllerInstance);
+musicControllerInstance.createFeaturedPlaylist = musicControllerInstance.createFeaturedPlaylist.bind(musicControllerInstance);
+musicControllerInstance.updateFeaturedPlaylist = musicControllerInstance.updateFeaturedPlaylist.bind(musicControllerInstance);
+musicControllerInstance.deleteFeaturedPlaylist = musicControllerInstance.deleteFeaturedPlaylist.bind(musicControllerInstance);
+musicControllerInstance.syncFeaturedPlaylist = musicControllerInstance.syncFeaturedPlaylist.bind(musicControllerInstance);
+
+export default musicControllerInstance;

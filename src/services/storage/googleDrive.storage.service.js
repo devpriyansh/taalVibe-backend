@@ -91,16 +91,48 @@ class GoogleDriveStorageService {
     return connection;
   }
 
-  async syncLibrary() {
+  async listSubfolders(parentFolderId = null) {
+    const drive = await this.getSystemDriveClient();
     const connection = await db.GoogleDriveConnection.findOne({ where: { isSystem: true } });
-    if (!connection || !connection.folderId) {
+    const targetFolderId = parentFolderId || connection?.folderId;
+    if (!targetFolderId) return [];
+
+    try {
+      const query = `'${targetFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      const res = await drive.files.list({
+        q: query,
+        fields: 'files(id, name, modifiedTime)',
+        pageSize: 100
+      });
+      return res.data.files || [];
+    } catch (e) {
+      console.error('Error listing subfolders:', e.message);
+      return [];
+    }
+  }
+
+  async syncLibrary(specificFolderId = null) {
+    const connection = await db.GoogleDriveConnection.findOne({ where: { isSystem: true } });
+    const rootFolderId = specificFolderId || connection?.folderId;
+    if (!connection || !rootFolderId) {
       throw new Error('System Google Drive or Music Folder not configured');
     }
 
     const drive = await this.getSystemDriveClient();
-    const rootFolderId = connection.folderId;
     
     const foldersToScan = [rootFolderId];
+    if (!specificFolderId && db.DrivePlaylist) {
+      try {
+        const drivePlaylists = await db.DrivePlaylist.findAll({ where: { isActive: true } });
+        for (const pl of drivePlaylists) {
+          if (pl.folderId && !foldersToScan.includes(pl.folderId)) {
+            foldersToScan.push(pl.folderId);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load playlist folders during sync:', err.message);
+      }
+    }
     const discoveredFiles = new Map(); // fileId -> { file, parentFolderId }
 
     // 1. Traverse folders recursively
@@ -138,23 +170,36 @@ class GoogleDriveStorageService {
     // 2. Fetch all existing songs from DB to compare
     const existingSongs = await db.Song.findAll({ where: { storageProvider: 'GOOGLE_DRIVE' } });
     const existingSongsMap = new Map();
+    // Track songs eligible for deactivation if not found during this scan
+    const songsEligibleForDeactivation = new Map();
+
     for (const song of existingSongs) {
       existingSongsMap.set(song.externalId, song);
+      // If syncing a specific folder, only consider songs in that folder for deactivation.
+      // If syncing entire library, consider all songs.
+      if (!specificFolderId || song.folderId === specificFolderId) {
+        songsEligibleForDeactivation.set(song.externalId, song);
+      }
     }
 
     // 3. Process discovered files
     for (const [fileId, { file, parentFolderId }] of discoveredFiles.entries()) {
       const existing = existingSongsMap.get(fileId);
+      songsEligibleForDeactivation.delete(fileId); // Mark as found in Drive
       let needsProcessing = true;
       
       if (existing) {
-        existingSongsMap.delete(fileId); // Mark as found
-        
-        // MVP: if it exists, skip metadata extraction unless it's inactive (then we reactivate it)
-        // If you wanted to detect metadata changes, you'd compare modifiedTime or file.size
         needsProcessing = false; 
+        let isUpdated = false;
         if (!existing.isActive) {
            existing.isActive = true;
+           isUpdated = true;
+        }
+        if (existing.folderId !== parentFolderId) {
+           existing.folderId = parentFolderId;
+           isUpdated = true;
+        }
+        if (isUpdated) {
            await existing.save();
            stats.updated++;
         } else {
@@ -168,7 +213,7 @@ class GoogleDriveStorageService {
           const streamRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
           let metadata;
           try {
-             metadata = await mm.parseStream(streamRes.data, { mimeType: file.mimeType }, { duration: true, skipCovers: false });
+             metadata = await mm.parseStream(streamRes.data, { mimeType: file.mimeType }, { duration: true, skipCovers: true });
           } catch (e) {
              console.warn(`music-metadata parsing error for ${file.name}:`, e.message);
           } finally {
@@ -205,16 +250,7 @@ class GoogleDriveStorageService {
           const genre = (metadata?.common?.genre && metadata.common.genre.length > 0) ? metadata.common.genre[0] : 'Unknown';
           const duration = metadata?.format?.duration ? Math.floor(metadata.format.duration) : 0;
           
-          let coverArtKey = null;
-          if (metadata?.common?.picture && metadata.common.picture.length > 0) {
-            const pic = metadata.common.picture[0];
-            const ext = pic.format === 'image/png' ? 'png' : 'jpg';
-            const fileName = `${fileId}.${ext}`;
-            const artPath = path.join(process.cwd(), 'public', 'artwork', fileName);
-            fs.mkdirSync(path.dirname(artPath), { recursive: true });
-            fs.writeFileSync(artPath, pic.data);
-            coverArtKey = fileName;
-          }
+          const coverArtKey = null;
 
           await db.Song.create({
             title, 
@@ -242,7 +278,7 @@ class GoogleDriveStorageService {
     }
 
     // 4. Mark remaining songs as inactive (they were not discovered in Drive)
-    for (const [fileId, song] of existingSongsMap.entries()) {
+    for (const [fileId, song] of songsEligibleForDeactivation.entries()) {
       if (song.isActive) {
         song.isActive = false;
         await song.save();

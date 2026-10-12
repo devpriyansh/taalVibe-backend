@@ -44,3 +44,12 @@ export const staging = {
 export const production = {
   ...commonSetting
 }
+
+const configs = {
+  development,
+  test,
+  staging,
+  production
+};
+
+export default configs;
