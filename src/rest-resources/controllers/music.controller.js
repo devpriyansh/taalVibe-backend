@@ -22,7 +22,8 @@ class MusicController {
       if (!code || !userId) return res.status(400).send('Missing auth code or user state');
 
       await GoogleDriveStorageService.handleCallback(code, userId);
-      return res.redirect('http://localhost:3000/settings');
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl.replace(/\/$/, '')}/settings?drive=connected`);
     } catch (error) {
       console.error('googleAuthCallback error:', error);
       return res.status(500).send('Internal Server Error: ' + error.message);
@@ -32,11 +33,13 @@ class MusicController {
   async getDriveStatus(req, res) {
     try {
       const connection = await db.GoogleDriveConnection.findOne({ where: { isSystem: true } });
+      const isConnected = !!connection && connection.status === 'CONNECTED';
       return res.status(200).json({ 
         status: 200, 
         message: 'Drive status', 
         result: { 
-          connected: !!connection,
+          connected: isConnected,
+          status: connection ? connection.status : 'DISCONNECTED',
           folderId: connection?.folderId,
           lastSyncedAt: connection?.lastSyncedAt 
         } 
@@ -66,6 +69,22 @@ class MusicController {
       return res.status(200).json({ status: 200, message: 'Sync complete', result });
     } catch (error) {
       console.error('syncLibrary error:', error);
+      const isAuthError = 
+        error.message?.includes('invalid_grant') || 
+        error.response?.data?.error === 'invalid_grant' ||
+        error.cause?.message === 'invalid_grant';
+
+      if (isAuthError) {
+        await db.GoogleDriveConnection.update(
+          { status: 'EXPIRED' },
+          { where: { isSystem: true } }
+        ).catch(() => {});
+        return res.status(401).json({
+          status: 401,
+          message: 'Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.',
+          error: error.message
+        });
+      }
       return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
     }
   }
@@ -291,6 +310,26 @@ class MusicController {
       }
     } catch (error) {
       console.error('streamSong error:', error);
+      const isAuthError = 
+        error.message?.includes('invalid_grant') || 
+        error.response?.data?.error === 'invalid_grant' ||
+        error.cause?.message === 'invalid_grant';
+
+      if (isAuthError) {
+        await db.GoogleDriveConnection.update(
+          { status: 'EXPIRED' },
+          { where: { isSystem: true } }
+        ).catch(() => {});
+
+        if (!res.headersSent) {
+          return res.status(401).json({
+            status: 401,
+            message: 'Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.',
+            code: 'GOOGLE_DRIVE_TOKEN_EXPIRED'
+          });
+        }
+      }
+
       if (!res.headersSent) {
         res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
       }
