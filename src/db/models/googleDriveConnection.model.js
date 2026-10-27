@@ -29,6 +29,16 @@ export default (sequelize, DataTypes) => {
         allowNull: false,
         field: 'refresh_token'
       },
+      accessToken: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        field: 'access_token'
+      },
+      tokenExpiry: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'token_expiry'
+      },
       scope: {
         type: DataTypes.STRING,
         allowNull: true

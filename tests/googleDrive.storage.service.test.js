@@ -8,10 +8,12 @@ import { GoogleDriveStorageService } from '../src/services/storage/googleDrive.s
 describe('GoogleDriveStorageService Token Refresh & Concurrency Audit Tests', () => {
   let service;
   let sandbox;
+  let updateStub;
 
   beforeEach(() => {
     sandbox = sinon.createSandbox();
     service = new GoogleDriveStorageService();
+    updateStub = sandbox.stub(db.GoogleDriveConnection, 'update').resolves([1]);
   });
 
   afterEach(() => {
@@ -146,7 +148,6 @@ describe('GoogleDriveStorageService Token Refresh & Concurrency Audit Tests', ()
       status: 'CONNECTED'
     };
     const findOneStub = sandbox.stub(db.GoogleDriveConnection, 'findOne').resolves(mockConnection);
-    const updateStub = sandbox.stub(db.GoogleDriveConnection, 'update').resolves([1]);
 
     const mockOAuthClient = new EventEmitter();
     mockOAuthClient.credentials = {};
@@ -317,5 +318,117 @@ describe('GoogleDriveStorageService Token Refresh & Concurrency Audit Tests', ()
       'Refresh token must be updated when a new valid one is received'
     );
     assert.strictEqual(existingConnection.status, 'CONNECTED');
+  });
+
+  it('9. Temporary network errors do NOT mark connection permanently EXPIRED', async () => {
+    const mockConnection = {
+      isSystem: true,
+      refreshToken: 'network-test-token',
+      status: 'CONNECTED'
+    };
+    sandbox.stub(db.GoogleDriveConnection, 'findOne').resolves(mockConnection);
+
+    const mockOAuthClient = new EventEmitter();
+    mockOAuthClient.credentials = {};
+    mockOAuthClient.setCredentials = sandbox.stub();
+    const networkError = new Error('connect ETIMEDOUT 142.250.190.42:443');
+    networkError.code = 'ETIMEDOUT';
+    mockOAuthClient.getAccessToken = sandbox.stub().rejects(networkError);
+
+    sandbox.stub(service, 'getOAuthClient').returns(mockOAuthClient);
+
+    await assert.rejects(
+      async () => service.getAuthenticatedOAuthClient(),
+      (err) => {
+        assert.strictEqual(err.code, 'ETIMEDOUT');
+        return true;
+      }
+    );
+
+    // Verify that update({ status: 'EXPIRED' }) was NEVER called
+    assert.strictEqual(updateStub.calledWith({ status: 'EXPIRED' }), false, 'Temporary network errors must NOT mark connection EXPIRED');
+  });
+
+  it('10. Reconnection saves access token, refresh token, expiry time, and status to DB', async () => {
+    const existingConnection = {
+      googleAccountId: 'old-id',
+      refreshToken: 'old-refresh',
+      accessToken: null,
+      tokenExpiry: null,
+      status: 'EXPIRED',
+      save: sandbox.stub().resolves()
+    };
+    sandbox.stub(db.GoogleDriveConnection, 'findOne').resolves(existingConnection);
+
+    const mockOAuthClient = new EventEmitter();
+    mockOAuthClient.setCredentials = sandbox.stub();
+    const expiryTimestamp = Date.now() + 3600 * 1000;
+    mockOAuthClient.getToken = sandbox.stub().resolves({
+      tokens: {
+        access_token: 'new-persisted-access-token',
+        refresh_token: 'new-persisted-refresh-token',
+        expiry_date: expiryTimestamp,
+        scope: 'https://www.googleapis.com/auth/drive.readonly'
+      }
+    });
+
+    sandbox.stub(service, 'getOAuthClient').returns(mockOAuthClient);
+
+    const { google } = require('googleapis');
+    sandbox.stub(google, 'oauth2').returns({
+      userinfo: {
+        get: sandbox.stub().resolves({ data: { id: 'admin-account-777' } })
+      }
+    });
+
+    await service.handleCallback('code-abc', 'system');
+
+    assert.strictEqual(existingConnection.refreshToken, 'new-persisted-refresh-token');
+    assert.strictEqual(existingConnection.accessToken, 'new-persisted-access-token');
+    assert.ok(existingConnection.tokenExpiry instanceof Date);
+    assert.strictEqual(existingConnection.status, 'CONNECTED');
+    assert.strictEqual(existingConnection.googleAccountId, 'admin-account-777');
+    assert.strictEqual(existingConnection.save.callCount, 1);
+  });
+
+  it('11. streamFile handles HTTP Range requests and pipes media stream', async () => {
+    const mockDrive = {
+      files: {
+        get: sandbox.stub()
+      }
+    };
+    // First call: metadata
+    mockDrive.files.get.onFirstCall().resolves({
+      data: { size: '10000000', mimeType: 'audio/mpeg' }
+    });
+    // Second call: media stream
+    const mockStream = new EventEmitter();
+    mockStream.pipe = sandbox.stub().callsFake((dest) => {
+      dest.written = true;
+    });
+    mockDrive.files.get.onSecondCall().resolves({
+      data: mockStream
+    });
+
+    sandbox.stub(service, 'getSystemDriveClient').resolves(mockDrive);
+
+    let writtenHeaders = {};
+    let writtenStatus = null;
+    const res = {
+      headersSent: false,
+      writeHead(status, headers) {
+        writtenStatus = status;
+        writtenHeaders = headers;
+      },
+      end: sandbox.stub()
+    };
+
+    await service.streamFile('mock-file-external-id', 'bytes=0-1048575', res);
+
+    assert.strictEqual(writtenStatus, 206, 'Must respond with 206 Partial Content for Range requests');
+    assert.strictEqual(writtenHeaders['Content-Range'], 'bytes 0-1048575/10000000');
+    assert.strictEqual(writtenHeaders['Content-Length'], 1048576);
+    assert.strictEqual(writtenHeaders['Content-Type'], 'audio/mpeg');
+    assert.strictEqual(mockStream.pipe.callCount, 1, 'Stream must be piped to response');
   });
 });
