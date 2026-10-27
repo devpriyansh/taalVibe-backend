@@ -9,7 +9,7 @@
     "babel-node": "babel-node",
     "lint": "standard --fix",
     "start:dev": "nodemon --exec npm run babel-node -- ./index.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "babel-node tests/googleDrive.storage.service.test.js && babel-node tests/music.controller.test.js",
     "sequelize": "npm run babel-node node_modules/.bin/sequelize-cli"
   },
   "author": "",

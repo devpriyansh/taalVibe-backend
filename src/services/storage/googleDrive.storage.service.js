@@ -10,6 +10,19 @@ class GoogleDriveStorageService {
     this.clientId = config.get('google.clientId');
     this.clientSecret = config.get('google.clientSecret');
     this.redirectUri = config.get('google.redirectUri');
+
+    // In-memory token & client cache for automatic renewal and concurrent request safety
+    this.cachedOAuth2Client = null;
+    this.cachedRefreshToken = null;
+    this.tokenExpiryDate = null;
+    this.refreshPromise = null;
+  }
+
+  resetCache() {
+    this.cachedOAuth2Client = null;
+    this.cachedRefreshToken = null;
+    this.tokenExpiryDate = null;
+    this.refreshPromise = null;
   }
 
   getOAuthClient() {
@@ -34,6 +47,42 @@ class GoogleDriveStorageService {
     });
   }
 
+  isAuthError(error) {
+    if (!error) return false;
+    const msg = error.message || '';
+    const code = error.code;
+    const errData = error.response?.data?.error || '';
+    const desc = error.response?.data?.error_description || '';
+    const causeMsg = error.cause?.message || '';
+
+    return (
+      code === 'GOOGLE_DRIVE_TOKEN_EXPIRED' ||
+      msg.includes('invalid_grant') ||
+      msg.includes('Token has been expired or revoked') ||
+      msg.includes('invalid_token') ||
+      errData === 'invalid_grant' ||
+      errData === 'invalid_token' ||
+      desc.includes('invalid_grant') ||
+      causeMsg.includes('invalid_grant')
+    );
+  }
+
+  async markConnectionExpired(reason = 'Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.') {
+    this.resetCache();
+    try {
+      await db.GoogleDriveConnection.update(
+        { status: 'EXPIRED' },
+        { where: { isSystem: true } }
+      );
+    } catch (err) {
+      console.error('Failed to update GoogleDriveConnection status to EXPIRED:', err.message);
+    }
+    const authError = new Error(reason);
+    authError.code = 'GOOGLE_DRIVE_TOKEN_EXPIRED';
+    authError.status = 401;
+    return authError;
+  }
+
   async handleCallback(code, stateParam) {
     const oauth2Client = this.getOAuthClient();
     const { tokens } = await oauth2Client.getToken(code);
@@ -52,6 +101,9 @@ class GoogleDriveStorageService {
     });
     
     if (!connection) {
+      if (!tokens.refresh_token) {
+        throw new Error('Google did not return a refresh token. Please re-authorize with offline access consent.');
+      }
       connection = await db.GoogleDriveConnection.create({
         userId,
         isSystem,
@@ -62,24 +114,116 @@ class GoogleDriveStorageService {
       });
     } else {
       connection.googleAccountId = userInfo.data.id;
-      if (tokens.refresh_token) {
+      // Preserve existing refresh token if Google does not return a new one.
+      // Do not overwrite a valid refresh token with null or an empty value.
+      if (tokens.refresh_token && typeof tokens.refresh_token === 'string' && tokens.refresh_token.trim() !== '') {
         connection.refreshToken = tokens.refresh_token;
       }
       connection.status = 'CONNECTED';
       await connection.save();
     }
 
+    // Invalidate/reset cache so the updated connection takes effect immediately
+    this.resetCache();
+
     return connection;
   }
 
-  async getSystemDriveClient() {
+  async getAuthenticatedOAuthClient() {
     const connection = await db.GoogleDriveConnection.findOne({ where: { isSystem: true } });
     if (!connection || !connection.refreshToken) {
-      throw new Error('System Google Drive not connected or refresh token missing');
+      const err = new Error('System Google Drive not connected or refresh token missing');
+      err.code = 'GOOGLE_DRIVE_NOT_CONNECTED';
+      err.status = 404;
+      throw err;
     }
 
-    const oauth2Client = this.getOAuthClient();
-    oauth2Client.setCredentials({ refresh_token: connection.refreshToken });
+    // If marked EXPIRED, do not repeatedly retry Google OAuth endpoint
+    if (connection.status === 'EXPIRED') {
+      const err = new Error('Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.');
+      err.code = 'GOOGLE_DRIVE_TOKEN_EXPIRED';
+      err.status = 401;
+      throw err;
+    }
+
+    const now = Date.now();
+    const bufferMs = 5 * 60 * 1000; // 5 minute buffer before expiry
+
+    // Reuse cached client if access token is still fresh
+    if (
+      this.cachedOAuth2Client &&
+      this.cachedRefreshToken === connection.refreshToken &&
+      this.tokenExpiryDate &&
+      this.tokenExpiryDate > (now + bufferMs)
+    ) {
+      return this.cachedOAuth2Client;
+    }
+
+    // Concurrency lock / single-flight: await if refresh already in progress
+    if (this.refreshPromise) {
+      await this.refreshPromise;
+      if (
+        this.cachedOAuth2Client &&
+        this.cachedRefreshToken === connection.refreshToken &&
+        this.tokenExpiryDate &&
+        this.tokenExpiryDate > (now + bufferMs)
+      ) {
+        return this.cachedOAuth2Client;
+      }
+    }
+
+    // Start single-flight token refresh under mutex
+    this.refreshPromise = (async () => {
+      try {
+        const oauth2Client = this.getOAuthClient();
+        oauth2Client.setCredentials({ refresh_token: connection.refreshToken });
+
+        oauth2Client.on('tokens', async (tokens) => {
+          if (tokens.refresh_token && typeof tokens.refresh_token === 'string' && tokens.refresh_token.trim() !== '') {
+            try {
+              await db.GoogleDriveConnection.update(
+                { refreshToken: tokens.refresh_token },
+                { where: { isSystem: true } }
+              );
+              this.cachedRefreshToken = tokens.refresh_token;
+            } catch (err) {
+              console.error('Failed to update rotated refresh token in DB:', err.message);
+            }
+          }
+          if (tokens.expiry_date) {
+            this.tokenExpiryDate = tokens.expiry_date;
+          }
+        });
+
+        const tokenRes = await oauth2Client.getAccessToken();
+        const accessToken = tokenRes?.token || (typeof tokenRes === 'string' ? tokenRes : null);
+
+        if (!accessToken) {
+          throw new Error('Failed to obtain access token from Google');
+        }
+
+        this.cachedOAuth2Client = oauth2Client;
+        this.cachedRefreshToken = connection.refreshToken;
+        this.tokenExpiryDate = oauth2Client.credentials?.expiry_date || (Date.now() + 3600 * 1000);
+
+        return oauth2Client;
+      } catch (error) {
+        if (this.isAuthError(error)) {
+          console.error('Google Drive token refresh failed with auth error:', error.message);
+          throw await this.markConnectionExpired();
+        }
+        console.error('Google Drive token refresh failed:', error.message);
+        throw error;
+      } finally {
+        this.refreshPromise = null;
+      }
+    })();
+
+    return await this.refreshPromise;
+  }
+
+  async getSystemDriveClient() {
+    const oauth2Client = await this.getAuthenticatedOAuthClient();
     return google.drive({ version: 'v3', auth: oauth2Client });
   }
 
@@ -92,12 +236,12 @@ class GoogleDriveStorageService {
   }
 
   async listSubfolders(parentFolderId = null) {
-    const drive = await this.getSystemDriveClient();
-    const connection = await db.GoogleDriveConnection.findOne({ where: { isSystem: true } });
-    const targetFolderId = parentFolderId || connection?.folderId;
-    if (!targetFolderId) return [];
-
     try {
+      const drive = await this.getSystemDriveClient();
+      const connection = await db.GoogleDriveConnection.findOne({ where: { isSystem: true } });
+      const targetFolderId = parentFolderId || connection?.folderId;
+      if (!targetFolderId) return [];
+
       const query = `'${targetFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
       const res = await drive.files.list({
         q: query,
@@ -106,8 +250,11 @@ class GoogleDriveStorageService {
       });
       return res.data.files || [];
     } catch (e) {
+      if (this.isAuthError(e)) {
+        throw await this.markConnectionExpired();
+      }
       console.error('Error listing subfolders:', e.message);
-      return [];
+      throw e;
     }
   }
 
@@ -160,6 +307,9 @@ class GoogleDriveStorageService {
           pageToken = res.data.nextPageToken;
         } catch (error) {
           console.error(`Error scanning folder ${currentFolderId}:`, error.message);
+          if (this.isAuthError(error)) {
+            throw await this.markConnectionExpired();
+          }
           pageToken = null; // Skip remaining pages for this folder on error
         }
       } while (pageToken);
@@ -271,6 +421,9 @@ class GoogleDriveStorageService {
           });
           stats.added++;
         } catch (error) {
+          if (this.isAuthError(error)) {
+            throw await this.markConnectionExpired();
+          }
           console.error(`Failed to process file ${file.name}:`, error.message);
           stats.failed++;
         }
@@ -293,65 +446,78 @@ class GoogleDriveStorageService {
   }
 
   async streamFile(externalId, rangeHeader, res) {
-    const drive = await this.getSystemDriveClient();
-    
-    // 1. Get file metadata to determine full size
-    const metadataRes = await drive.files.get({
-      fileId: externalId,
-      fields: 'size, mimeType'
-    });
-    
-    const fileSize = parseInt(metadataRes.data.size, 10);
-    const mimeType = metadataRes.data.mimeType;
+    try {
+      const drive = await this.getSystemDriveClient();
+      
+      // 1. Get file metadata to determine full size
+      const metadataRes = await drive.files.get({
+        fileId: externalId,
+        fields: 'size, mimeType'
+      });
+      
+      const fileSize = parseInt(metadataRes.data.size, 10);
+      const mimeType = metadataRes.data.mimeType;
 
-    // 2. Handle Range Header
-    let start = 0;
-    let end = fileSize - 1;
+      // 2. Handle Range Header
+      let start = 0;
+      let end = fileSize - 1;
 
-    if (rangeHeader) {
-      const parts = rangeHeader.replace(/bytes=/, "").split("-");
-      start = parseInt(parts[0], 10);
-      end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      if (rangeHeader) {
+        const parts = rangeHeader.replace(/bytes=/, "").split("-");
+        start = parseInt(parts[0], 10);
+        end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
-      // Handle edge cases
-      if (start >= fileSize) {
-        res.status(416).send('Requested range not satisfiable\n' + start + ' >= ' + fileSize);
-        return;
+        // Handle edge cases
+        if (start >= fileSize) {
+          res.status(416).send('Requested range not satisfiable\n' + start + ' >= ' + fileSize);
+          return;
+        }
+
+        const chunksize = (end - start) + 1;
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': mimeType,
+        });
+      } else {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': mimeType,
+          'Accept-Ranges': 'bytes',
+        });
       }
 
-      const chunksize = (end - start) + 1;
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': mimeType,
+      // 3. Request the stream from Google Drive with specific Range
+      const streamRes = await drive.files.get(
+        { fileId: externalId, alt: 'media' },
+        { 
+          responseType: 'stream',
+          headers: rangeHeader ? { Range: rangeHeader } : {}
+        }
+      );
+
+      // 4. Pipe to response
+      streamRes.data.on('end', () => res.end());
+      streamRes.data.on('error', (err) => {
+        console.error('Error streaming from Drive:', err);
+        if (!res.headersSent) {
+          res.status(500).end();
+        } else {
+          res.destroy();
+        }
       });
-    } else {
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes',
-      });
+      
+      streamRes.data.pipe(res);
+    } catch (error) {
+      if (this.isAuthError(error)) {
+        throw await this.markConnectionExpired();
+      }
+      throw error;
     }
-
-    // 3. Request the stream from Google Drive with specific Range
-    const streamRes = await drive.files.get(
-      { fileId: externalId, alt: 'media' },
-      { 
-        responseType: 'stream',
-        headers: rangeHeader ? { Range: rangeHeader } : {}
-      }
-    );
-
-    // 4. Pipe to response
-    streamRes.data.on('end', () => res.end());
-    streamRes.data.on('error', (err) => {
-      console.error('Error streaming from Drive:', err);
-      res.status(500).end();
-    });
-    
-    streamRes.data.pipe(res);
   }
 }
 
-export default new GoogleDriveStorageService();
+const googleDriveStorageServiceInstance = new GoogleDriveStorageService();
+export { GoogleDriveStorageService };
+export default googleDriveStorageServiceInstance;

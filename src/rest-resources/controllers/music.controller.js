@@ -2,6 +2,33 @@ import db from '../../db/models';
 import GoogleDriveStorageService from '../../services/storage/googleDrive.storage.service';
 const { Sequelize, Op } = require('sequelize');
 
+const handleDriveAuthError = (error, res) => {
+  const isAuthError = 
+    error.code === 'GOOGLE_DRIVE_TOKEN_EXPIRED' ||
+    error.message?.includes('invalid_grant') || 
+    error.message?.includes('expired or was revoked') ||
+    error.response?.data?.error === 'invalid_grant' ||
+    error.cause?.message === 'invalid_grant';
+
+  if (isAuthError) {
+    db.GoogleDriveConnection.update(
+      { status: 'EXPIRED' },
+      { where: { isSystem: true } }
+    ).catch(() => {});
+
+    if (!res.headersSent) {
+      res.status(401).json({
+        status: 401,
+        message: 'Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.',
+        code: 'GOOGLE_DRIVE_TOKEN_EXPIRED',
+        error: error.message
+      });
+    }
+    return true;
+  }
+  return false;
+};
+
 class MusicController {
   
   async googleAuthInit(req, res) {
@@ -69,22 +96,7 @@ class MusicController {
       return res.status(200).json({ status: 200, message: 'Sync complete', result });
     } catch (error) {
       console.error('syncLibrary error:', error);
-      const isAuthError = 
-        error.message?.includes('invalid_grant') || 
-        error.response?.data?.error === 'invalid_grant' ||
-        error.cause?.message === 'invalid_grant';
-
-      if (isAuthError) {
-        await db.GoogleDriveConnection.update(
-          { status: 'EXPIRED' },
-          { where: { isSystem: true } }
-        ).catch(() => {});
-        return res.status(401).json({
-          status: 401,
-          message: 'Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.',
-          error: error.message
-        });
-      }
+      if (handleDriveAuthError(error, res)) return;
       return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
     }
   }
@@ -310,25 +322,7 @@ class MusicController {
       }
     } catch (error) {
       console.error('streamSong error:', error);
-      const isAuthError = 
-        error.message?.includes('invalid_grant') || 
-        error.response?.data?.error === 'invalid_grant' ||
-        error.cause?.message === 'invalid_grant';
-
-      if (isAuthError) {
-        await db.GoogleDriveConnection.update(
-          { status: 'EXPIRED' },
-          { where: { isSystem: true } }
-        ).catch(() => {});
-
-        if (!res.headersSent) {
-          return res.status(401).json({
-            status: 401,
-            message: 'Google Drive authorization token has expired or was revoked. Please reconnect Google Drive in Settings.',
-            code: 'GOOGLE_DRIVE_TOKEN_EXPIRED'
-          });
-        }
-      }
+      if (handleDriveAuthError(error, res)) return;
 
       if (!res.headersSent) {
         res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
@@ -730,6 +724,7 @@ class MusicController {
       });
     } catch (error) {
       console.error('getAdminDriveFolders error:', error);
+      if (handleDriveAuthError(error, res)) return;
       return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
     }
   }
@@ -832,6 +827,7 @@ class MusicController {
       });
     } catch (error) {
       console.error('syncFeaturedPlaylist error:', error);
+      if (handleDriveAuthError(error, res)) return;
       return res.status(500).json({ status: 500, message: 'Internal Server Error', error: error.message });
     }
   }

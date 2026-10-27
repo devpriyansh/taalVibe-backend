@@ -25,6 +25,15 @@ const standardResponseSchema = {
       },
       required: ['status', 'message']
     },
+    401: {
+      type: 'object',
+      properties: {
+        status: { type: 'integer' },
+        message: { type: 'string' },
+        code: { type: 'string' },
+        error: { type: 'string' }
+      }
+    },
     500: {
       type: 'object',
       properties: {
